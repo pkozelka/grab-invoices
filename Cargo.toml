@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
-google-gmail1 = "5.0.0"
-yup-oauth2 = "8.3.0"
-chrono = "0.4"
+google-gmail1 = "5.0.5"
+# Use 0.21 but with the new Engine API
 base64 = "0.21"
+chrono = "0.4"
