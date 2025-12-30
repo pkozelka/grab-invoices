@@ -3,3 +3,8 @@ target/
 .DS_Store
 Cargo.lock
 .env
+
+
+# Added by cargo
+
+/target
