@@ -6,6 +6,8 @@ edition = "2024"
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 google-gmail1 = "5.0.5"
-# Use 0.21 but with the new Engine API
+yup-oauth2 = "8.3.0"
 base64 = "0.21"
 chrono = "0.4"
+# We need hyper-rustls for the connector type in the function signature
+hyper-rustls = { version = "0.24", features = ["tokio-runtime", "native-tokio", "http1"] }
