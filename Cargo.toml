@@ -1,10 +1,13 @@
 [package]
 name = "grab-invoices"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 google-gmail1 = "5.0.5"
+yup-oauth2 = "8.3.0"
+hyper = "0.14"
+hyper-rustls = "0.24"
 base64 = "0.21"
 chrono = "0.4"
