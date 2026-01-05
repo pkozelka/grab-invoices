@@ -1,11 +1,12 @@
-use google_gmail1 as gmail1;
 use gmail1::api::ListMessagesResponse;
-use hyper_rustls::HttpsConnectorBuilder;
+use google_gmail1 as gmail1;
 use google_gmail1::oauth2::{
     ServiceAccountAuthenticator,
     ServiceAccountKey,
 };
+use hyper_rustls::HttpsConnectorBuilder;
 
+use google_gmail1::api::{Message, MessagePartHeader};
 use std::fs::File;
 use std::io::Read;
 
@@ -45,11 +46,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let query = format!("from:{} subject:{}", sender, subject);
 
     // ===== LIST MESSAGES =====
-    let result: ListMessagesResponse = hub
+    let call = hub
         .users()
         .messages_list("me")
         .q(&query)
-        .max_results(max_results)
+        .max_results(max_results);
+    let result: ListMessagesResponse = call
         .doit()
         .await?
         .1;
@@ -58,8 +60,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("Found {} messages", messages.len());
 
         for msg in messages {
-            println!("Message ID: {:?} Payload: {:?}", msg.id, msg.payload);
-            // println!("{:?}", msg.snippet);
+            println!("-------------");
+            if let Some(id) = msg.id {
+                let msg: Message = hub
+                    .users()
+                    .messages_get("me", &id)
+                    .format("metadata")
+                    .add_metadata_headers("From")
+                    .add_metadata_headers("Subject")
+                    .add_metadata_headers("Date")
+                    .add_scope("https://www.googleapis.com/auth/gmail.readonly")
+                    .doit()
+                    .await?
+                    .1;
+                println!("Snippet: {:?}", msg.snippet);
+                for MessagePartHeader { name, value } in msg.payload.unwrap().headers.unwrap() {
+                    println!("* {:?} = {:?}",  name, value);
+                }
+            }
         }
     } else {
         println!("No messages found");
