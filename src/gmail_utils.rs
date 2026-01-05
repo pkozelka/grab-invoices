@@ -1,8 +1,10 @@
 use chrono::DateTime;
 use gmail1::api::{Message, MessagePart};
 use google_gmail1 as gmail1;
-use hyper_rustls::HttpsConnectorBuilder;
 
+use hyper::{Body, Client, Request};
+use hyper_rustls::HttpsConnectorBuilder;
+use base64::Engine;
 use std::{fs::File, io::Read};
 
 pub struct GmailConfig {
@@ -24,24 +26,49 @@ fn extract_header_value(headers: &[gmail1::api::MessagePartHeader], name: &str) 
         .and_then(|h| h.value.clone())
 }
 
-fn collect_attachments(parts: &[MessagePart], out: &mut Vec<(String, Vec<u8>)>) {
+/// Represents a Gmail attachment, either inline data or needs separate fetch
+#[derive(Debug)]
+pub struct GmailAttachment {
+    pub filename: String,
+    pub data: Option<Vec<u8>>,      // Some if body.data exists
+    pub attachment_id: Option<String>, // Some if body.attachmentId exists
+}
+
+/// Recursively collects attachments from payload parts
+pub fn collect_attachments(parts: &[MessagePart], out: &mut Vec<GmailAttachment>) {
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use base64::Engine;
 
     for part in parts {
         if let Some(fname) = &part.filename {
             if !fname.is_empty() {
+                let mut attachment = GmailAttachment {
+                    filename: fname.clone(),
+                    data: None,
+                    attachment_id: None,
+                };
+
                 if let Some(body) = &part.body {
-                    if let Some(data) = &body.data {
-                        if let Ok(bytes) = URL_SAFE_NO_PAD.decode(data) {
-                            out.push((fname.clone(), bytes));
+                    // Small inline attachment
+                    if let Some(data_str) = &body.data {
+                        if let Ok(decoded) = URL_SAFE_NO_PAD.decode(data_str) {
+                            attachment.data = Some(decoded);
                         }
                     }
+
+                    // Large attachment requiring separate fetch
+                    if let Some(att_id) = &body.attachment_id {
+                        attachment.attachment_id = Some(att_id.clone());
+                    }
                 }
+
+                out.push(attachment);
             }
         }
-        if let Some(sub) = &part.parts {
-            collect_attachments(sub, out);
+
+        // Recurse into nested parts (multipart/mixed)
+        if let Some(subparts) = &part.parts {
+            collect_attachments(subparts, out);
         }
     }
 }
@@ -67,7 +94,7 @@ pub async fn list_and_download(cfg: GmailConfig) -> Result<(), anyhow::Error> {
     let client = hyper::Client::builder().build::<_, hyper::Body>(https);
 
     // Create Gmail hub
-    let hub = gmail1::Gmail::new(client, auth);
+    let hub = gmail1::Gmail::new(client, auth.clone());
 
     // Search query
     let query = format!("from:{} subject:{}", cfg.sender, cfg.subject);
@@ -118,10 +145,104 @@ pub async fn list_and_download(cfg: GmailConfig) -> Result<(), anyhow::Error> {
 
         println!("  {} attachments", attachments.len());
 
-        for (filename, data) in attachments {
-            std::fs::write(&filename, &data)?;
-            println!("Saved attachment: {}", filename);
-        }
+
+        // Download all attachments
+        download_all_attachments(&auth, &id, &attachments).await?;
     }
     Ok(())
+}
+
+use anyhow::Result;
+use std::io::Write;
+
+/// Downloads all attachments for a single message
+///
+/// # Arguments
+/// - `hub`: Gmail hub
+/// - `attachments`: list of attachments returned from `collect_attachments`
+/// - `message_id`: the message ID
+///
+/// This will:
+/// - Write inline attachments directly
+/// - Fetch large attachments via Gmail API if `attachment_id` exists
+pub async fn download_all_attachments<A>(
+    auth: &A,
+    message_id: &str,
+    attachments: &[GmailAttachment],
+) -> Result<()>
+where
+    A: google_gmail1::client::GetToken + Clone + Send + Sync + 'static,
+{
+    // Build HTTPS client for raw HTTP fetch
+    let https = HttpsConnectorBuilder::new()
+        .with_native_roots()
+        .https_or_http()
+        .enable_http1()
+        .build();
+    let client = Client::builder().build::<_, Body>(https);
+
+    // Get access token from the authenticator
+    let token = auth
+        .get_token(&["https://www.googleapis.com/auth/gmail.readonly"])
+        .await.map_err(|e| anyhow::anyhow!("{:?}", e))?
+        .unwrap()
+        .as_str()
+        .to_string();
+
+    for att in attachments {
+        if let Some(data) = &att.data {
+            // Small inline attachment
+            let mut file = File::create(&att.filename)?;
+            file.write_all(data)?;
+            println!("Saved inline attachment: {}", att.filename);
+        } else if let Some(att_id) = &att.attachment_id {
+            // Large attachment: fetch via raw HTTP
+            let url = format!(
+                "https://gmail.googleapis.com/gmail/v1/users/me/messages/{}/attachments/{}",
+                message_id, att_id
+            );
+
+            let req = Request::builder()
+                .uri(url)
+                .header("Authorization", format!("Bearer {}", token))
+                .body(Body::empty())?;
+
+            let res = client.request(req).await?;
+            let body_bytes = hyper::body::to_bytes(res.into_body()).await?;
+
+            #[derive(serde::Deserialize)]
+            struct AttachmentResponse { data: String }
+            let r: AttachmentResponse = serde_json::from_slice(&body_bytes)?;
+
+            match decode_gmail_attachment(&r.data) {
+                Ok(decoded) => {
+                    let mut file = File::create(format!("target/{}", &att.filename))?;
+                    file.write_all(&decoded)?;
+                    println!("  * Downloaded attachment via API: {}", att.filename);
+                }
+                Err(e) => {
+                    println!("  ! DATA/b64: {:?}", r.data);
+                    println!("  ! Failed to decode attachment: {}", e);
+                }
+            }
+
+        }
+    }
+
+    Ok(())
+}
+
+use base64::engine::general_purpose::URL_SAFE;
+
+/// Decode Gmail attachment data (handles missing padding)
+pub fn decode_gmail_attachment(data: &str) -> anyhow::Result<Vec<u8>> {
+    // Gmail sometimes omits padding, so we need to pad manually
+    let mut s = data.to_string();
+    let rem = s.len() % 4;
+    if rem != 0 {
+        s.extend(std::iter::repeat('=').take(4 - rem));
+    }
+
+    let decoded = URL_SAFE.decode(s.as_bytes())?;
+    Ok(decoded)
 }
