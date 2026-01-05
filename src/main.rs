@@ -9,7 +9,20 @@ use hyper_rustls::HttpsConnectorBuilder;
 use google_gmail1::api::{Message, MessagePartHeader};
 use std::fs::File;
 use std::io::Read;
+use chrono::{DateTime, FixedOffset};
 
+fn header_value(headers: &[MessagePartHeader], name: &str) -> Option<String> {
+    headers
+        .iter()
+        .find(|h| h.name.as_deref().map(|n| n.eq_ignore_ascii_case(name)).unwrap_or(false))
+        .and_then(|h| h.value.clone())
+}
+
+fn parse_date_to_iso(date_header: &str) -> Option<String> {
+    DateTime::parse_from_rfc2822(date_header)
+        .map(|dt: DateTime<FixedOffset>| dt.to_rfc3339())
+        .ok()
+}
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ===== CONFIG =====
@@ -73,10 +86,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .doit()
                     .await?
                     .1;
-                println!("Snippet: {:?}", msg.snippet);
-                for MessagePartHeader { name, value } in msg.payload.unwrap().headers.unwrap() {
-                    println!("* {:?} = {:?}",  name, value);
+
+                if let Some(payload) = msg.payload {
+                    if let Some(headers) = payload.headers {
+                        let from = header_value(&headers, "From").unwrap_or("<unknown>".into());
+                        let subject = header_value(&headers, "Subject").unwrap_or("<no subject>".into());
+
+                        let date_iso = header_value(&headers, "Date")
+                            .and_then(|d| parse_date_to_iso(&d))
+                            .unwrap_or("<invalid date>".into());
+
+                        println!("{} | {} | {}", date_iso, from, subject);
+                    }
                 }
+
             }
         }
     } else {
