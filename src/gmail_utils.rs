@@ -1,4 +1,4 @@
-use chrono::DateTime;
+use chrono::{DateTime, Datelike, Days, FixedOffset, Utc};
 use gmail1::api::{Message, MessagePart};
 use google_gmail1 as gmail1;
 
@@ -122,18 +122,30 @@ pub async fn list_and_download(cfg: GmailConfig) -> Result<(), anyhow::Error> {
             .add_scope("https://www.googleapis.com/auth/gmail.readonly")
             .doit().await?.1;
 
+        let mut prefix = "target/".to_string();
         // Extract headers
         if let Some(payload) = &full.payload {
             if let Some(ref headers) = payload.headers {
-                let date_iso = extract_header_value(headers, "Date")
-                    .and_then(|d| parse_rfc2822_to_iso(&d))
+                let date_header = extract_header_value(headers, "Date").unwrap();
+                let date_iso = parse_rfc2822_to_iso(&date_header)
                     .unwrap_or_default();
-                let from = extract_header_value(headers, "From").unwrap_or_default();
-                let subject = extract_header_value(headers, "Subject").unwrap_or_default();
 
-                println!("{} | {} | <{}>", date_iso, from, subject.as_str().trim().replace("\n", ""));
+                let dt = DateTime::parse_from_rfc2822(&date_header).unwrap_or_default();
+                let billing_period = previous_month_period(dt);
+                prefix.extend(billing_period.as_str().chars());
+                prefix.extend("-".chars());
+
+                let from = extract_header_value(headers, "From").unwrap_or_default();
+                let subject = extract_header_value(headers, "Subject")
+                    .unwrap_or_default()
+                    .as_str().trim().replace("\n", "");
+                if subject.as_str().find("Vaše faktura za doménu origis.cz je k dispozici").is_some() {
+                    prefix.extend("origis-cz-".chars())
+                }
+                println!("{} | {} | <{}>", date_iso, from, subject);
             }
         }
+        prefix.extend("GoogleWorkspace-".chars());
 
         // Collect attachments through inline bodies
         let mut attachments = Vec::new();
@@ -147,9 +159,23 @@ pub async fn list_and_download(cfg: GmailConfig) -> Result<(), anyhow::Error> {
 
 
         // Download all attachments
-        download_all_attachments(&auth, &id, &attachments).await?;
+        download_all_attachments(&auth, &id, &attachments, &prefix).await?;
     }
     Ok(())
+}
+
+fn previous_month_period(dt: DateTime<FixedOffset>) -> String {
+    let mut year = dt.year();
+    let mut month = dt.month(); // 1..=12
+
+    if month == 1 {
+        year -= 1;
+        month = 12;
+    } else {
+        month -= 1;
+    }
+
+    format!("{:04}-{:02}", year, month)
 }
 
 use anyhow::Result;
@@ -168,7 +194,8 @@ use std::io::Write;
 pub async fn download_all_attachments<A>(
     auth: &A,
     message_id: &str,
-    attachments: &[GmailAttachment],
+    attachments: &Vec<GmailAttachment>,
+    prefix: &str,
 ) -> Result<()>
 where
     A: google_gmail1::client::GetToken + Clone + Send + Sync + 'static,
@@ -192,7 +219,7 @@ where
     for att in attachments {
         if let Some(data) = &att.data {
             // Small inline attachment
-            let mut file = File::create(&att.filename)?;
+            let mut file = File::create(format!("{prefix}{}", &att.filename))?;
             file.write_all(data)?;
             println!("Saved inline attachment: {}", att.filename);
         } else if let Some(att_id) = &att.attachment_id {
@@ -216,7 +243,7 @@ where
 
             match decode_gmail_attachment(&r.data) {
                 Ok(decoded) => {
-                    let mut file = File::create(format!("target/{}", &att.filename))?;
+                    let mut file = File::create(format!("{prefix}{}", &att.filename))?;
                     file.write_all(&decoded)?;
                     println!("  * Downloaded attachment via API: {}", att.filename);
                 }
@@ -225,7 +252,6 @@ where
                     println!("  ! Failed to decode attachment: {}", e);
                 }
             }
-
         }
     }
 
