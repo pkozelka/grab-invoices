@@ -1,17 +1,16 @@
-use chrono::{DateTime, Datelike, Days, FixedOffset, Utc};
+use chrono::{DateTime, Datelike, FixedOffset};
 use gmail1::api::{Message, MessagePart};
 use google_gmail1 as gmail1;
 
+use base64::Engine;
 use hyper::{Body, Client, Request};
 use hyper_rustls::HttpsConnectorBuilder;
-use base64::Engine;
 use std::{fs::File, io::Read};
 
 pub struct GmailConfig {
     pub service_account_json: String,
     pub impersonate_user: String,
     pub sender: String,
-    pub subject: String,
 }
 
 fn parse_rfc2822_to_iso(date_str: &str) -> Option<String> {
@@ -97,7 +96,7 @@ pub async fn list_and_download(cfg: GmailConfig) -> Result<(), anyhow::Error> {
     let hub = gmail1::Gmail::new(client, auth.clone());
 
     // Search query
-    let query = format!("from:{} subject:{}", cfg.sender, cfg.subject);
+    let query = format!("from:{} after:2025/01/05", cfg.sender);
 
     let list = hub.users().messages_list("me")
         .q(&query)
@@ -140,12 +139,14 @@ pub async fn list_and_download(cfg: GmailConfig) -> Result<(), anyhow::Error> {
                     .unwrap_or_default()
                     .as_str().trim().replace("\n", "");
                 if subject.as_str().find("Vaše faktura za doménu origis.cz je k dispozici").is_some() {
-                    prefix.extend("origis-cz-".chars())
+                    prefix.extend("origis-cz-GoogleWorkspace-".chars())
+                }
+                if subject.as_str().find("Google Cloud Platform & APIs: Vaše faktura za doménu 009FE9-96B906-0B6266 je k dispozici").is_some() {
+                    prefix.extend("origis-cz-GoogleCloud-".chars())
                 }
                 println!("{} | {} | <{}>", date_iso, from, subject);
             }
         }
-        prefix.extend("GoogleWorkspace-".chars());
 
         // Collect attachments through inline bodies
         let mut attachments = Vec::new();
